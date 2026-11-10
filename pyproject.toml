@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oddspush"
+version = "0.1.0"
+description = "Python client for the OddsPush API: real-time Pinnacle odds over WebSocket and REST, with no-vig, fair and closing-line (CLV) prices."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "OddsPush", email = "support@oddspush.com" }]
+keywords = [
+    "pinnacle", "pinnacle-api", "odds", "odds-api", "sports-betting", "betting",
+    "websocket", "no-vig", "fair-odds", "clv", "closing-line", "polymarket", "kalshi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.24",
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-asyncio>=0.21"]
+
+[project.urls]
+Homepage = "https://oddspush.com"
+Documentation = "https://oddspush.com/docs"
+Pricing = "https://oddspush.com/#pricing"
+Source = "https://github.com/oddspush/oddspush-python"
+Issues = "https://github.com/oddspush/oddspush-python/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oddspush"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/oddspush", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
