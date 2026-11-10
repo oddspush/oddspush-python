@@ -5,7 +5,7 @@ its scheduled ``startTime``), its closing line is set and arrives as a ``closing
 the pre-match prices are final from then on, so the tracker prints the close and stops
 following that match.
 
-    ODDSPUSH_TOKEN=opk_... python prematch_tracker.py 1639824805 1639824811
+    ODDSPUSH_KEY=opk_... python prematch_tracker.py 1639824805 1639824811
 """
 
 import asyncio
@@ -26,7 +26,7 @@ async def main(event_ids):
     following = set(event_ids)
     seen = set()
     started = time.monotonic()
-    async with Stream(os.environ["ODDSPUSH_TOKEN"], events=event_ids, channels=["pre"],
+    async with Stream(os.environ["ODDSPUSH_KEY"], events=event_ids, channels=["pre"],
                       fair=True, closing=True) as stream:
         async for msg in stream:
             kind = msg["type"]

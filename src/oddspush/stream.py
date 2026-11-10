@@ -87,7 +87,7 @@ def _close_info(exc: BaseException) -> Tuple[Optional[int], str]:
 class Stream:
     """The OddsPush WebSocket stream, with reconnection and a local price book.
 
-    :param token: your API token (``opk_...``).
+    :param token: your API key (``opk_...``).
     :param sports: sport IDs to follow (see :data:`oddspush.SPORTS`).
     :param events: specific event IDs to follow.
     :param channels: ``ld`` and ``both`` are the prices; ``pre`` adds pre-match prices,
@@ -122,7 +122,7 @@ class Stream:
                  resync_jitter: float = 5.0, queue_size: int = 1000,
                  login_timeout: float = 15.0) -> None:
         if not token:
-            raise ValueError("token is required (it starts with opk_)")
+            raise ValueError("an API key is required (it starts with opk_)")
         self.url = url
         self._token = token
         channels = list(channels) if channels else None

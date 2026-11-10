@@ -11,7 +11,7 @@ your CLV.
 - Sync and asyncio REST clients.
 - Pure Python, two dependencies (`websockets`, `httpx`), Python 3.10+.
 
-You need an API token (`opk_...`). [Start a free 7-day trial](https://oddspush.com) to get
+You need an API key (`opk_...`). [Start a free 7-day trial](https://oddspush.com) to get
 one. Full API reference: [oddspush.com/docs](https://oddspush.com/docs).
 
 ```bash

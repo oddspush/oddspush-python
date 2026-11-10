@@ -84,7 +84,7 @@ class _Base:
     def __init__(self, token: str, *, base_url: str = REST_URL, timeout: float = 15.0,
                  max_retries: int = 2, max_retry_wait: float = 60.0) -> None:
         if not token:
-            raise ValueError("token is required (it starts with opk_)")
+            raise ValueError("an API key is required (it starts with opk_)")
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
         self.max_retry_wait = max_retry_wait

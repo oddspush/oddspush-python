@@ -1,6 +1,6 @@
 """Watch the no-vig and fair prices of tennis moneylines, with the bookmaker's margin.
 
-    ODDSPUSH_TOKEN=opk_... python fair_prices.py
+    ODDSPUSH_KEY=opk_... python fair_prices.py
 """
 
 import asyncio
@@ -10,7 +10,7 @@ from oddspush import Stream
 
 
 async def main():
-    async with Stream(os.environ["ODDSPUSH_TOKEN"], sports=[2], channels=["ld", "both"],
+    async with Stream(os.environ["ODDSPUSH_KEY"], sports=[2], channels=["ld", "both"],
                       fair=True) as stream:
         async for msg in stream:
             if msg["type"] != "fair":
