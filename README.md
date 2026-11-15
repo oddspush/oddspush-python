@@ -89,6 +89,30 @@ with Client("opk_...") as api:
 
 Or get them as they happen with `Stream(..., closing=True)` (`closing` messages).
 
+## Player props and specials
+
+Specials (player, game and team props) are events of their own (`rec.type == "special"`,
+`parentId` is the match). With `specials=True` your snapshots include them with their current
+prices, so the book recovers them after a reconnect:
+
+```python
+async with Stream("opk_...", sports=[3, 5], channels=["ld", "both", "pre"],
+                  specials=True) as stream:
+    async for msg in stream:
+        for event_id in stream.book:
+            ev = stream.book.event(event_id)
+            if ev.get("type") != "special":
+                continue
+            for key, m in stream.book.markets(event_id).items():
+                names = {p["id"]: p.get("name") for p in ev.get("participants") or []}
+                legs = [(names.get(p["participantId"]), p["price"]) for p in m["prices"]]
+                print(ev["special"]["description"], legs,
+                      "suspended" if stream.book.is_suspended(event_id, key) else "open")
+```
+
+Their markets have no `status`: a `closed` period suspends them (the book keeps them and
+`is_suspended` says so) and `settled` removes them.
+
 ## REST
 
 ```python
@@ -132,11 +156,13 @@ await stream.request_snapshot()
 In a bot that runs for days, `stream.book.prune(3600)` drops events that have had no update
 for an hour and have no open market left.
 
-### One machine per token
+### One machine per connection
 
-A token works from one IP at a time: using it from a new IP (a stream login or a REST
-request) moves it there and closes the stream on the old one (`TokenReplaced`). Run your
-stream and your REST calls from the same machine.
+A token works from as many IPs at a time as the connections in your plan: one included,
+plus any extra connections you add (90 USD each for 30 days, from your account page). Using it from
+a new IP beyond that (a stream login or a REST request) takes over from the oldest IP and
+closes the stream there (`TokenReplaced`). With one connection, run your stream and your
+REST calls from the same machine.
 
 ### Keep up
 

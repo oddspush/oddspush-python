@@ -48,7 +48,8 @@ class TokenReplaced(FatalError):
     """The token was used from another IP or connection, which now holds it (close 4107).
 
     Reconnecting would close the other machine's stream, which would close this one again,
-    and so on. Run each token from one machine only.
+    and so on. Use the token from no more IPs at a time than your connections; a new IP
+    beyond that replaces the oldest.
     """
 
 

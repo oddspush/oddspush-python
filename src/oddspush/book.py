@@ -9,6 +9,13 @@ The rules (the same as in the API documentation):
 - ``op: "del"`` removes the whole event, whatever channel it comes on;
 - a snapshot is merged by version, never used to clear the book.
 
+Specials and player props (``rec.type == "special"``) have no market ``status``: a special
+market is kept while its period is not ``settled``. A ``closed`` period suspends it (see
+:meth:`Book.is_suspended`) instead of removing it, because it usually reopens within
+seconds. Their market updates often come without ``version``: those repeat the price
+held, so a held market is kept. ``rec.version`` of a special goes up when its periods change,
+so a special update with a lower ``rec.version`` than one already applied is ignored.
+
 :class:`~oddspush.Stream` keeps one up to date for you (``stream.book``); you can also feed
 one yourself with :meth:`Book.apply_message`.
 """
@@ -33,11 +40,12 @@ def channel_of(topic: Optional[str]) -> str:
 
 
 class _Event:
-    __slots__ = ("meta", "markets", "versions", "fair", "updated", "live")
+    __slots__ = ("meta", "markets", "versions", "fair", "updated", "live", "rec_version")
 
     def __init__(self) -> None:
         self.updated = time.monotonic()
         self.live = False           # got a live update: snapshots no longer rewind it
+        self.rec_version: Optional[int] = None   # specials: highest rec.version applied
         self.meta: Dict[str, Any] = {}
         self.markets: Dict[str, Market] = {}
         # The highest version seen per key, closed markets included: a late update of a
@@ -110,8 +118,19 @@ class Book:
             ev = self._events[event_id] = _Event()
             if not snapshot:
                 self._removed.pop(event_id, None)
+        special = rec.get("type") == "special"
+        newer = False
+        if special:
+            rv = rec.get("version")
+            if isinstance(rv, int) and not isinstance(rv, bool):
+                if ev.rec_version is not None and rv < ev.rec_version:
+                    return                      # an older special update arriving late
+                newer = ev.rec_version is not None and rv > ev.rec_version
+                ev.rec_version = rv
         ev.updated = time.monotonic()
-        rewind = snapshot and ev.live
+        # A snapshot of a special newer than what is held (by rec.version) is not a rewind:
+        # its periods are the current ones.
+        rewind = snapshot and ev.live and not newer
         if rewind:
             for k, v in rec.items():
                 if k != "markets":
@@ -129,11 +148,14 @@ class Book:
             if version is not None and (newest is None or version > newest):
                 newest = version
             seen = ev.versions.get(key)
+            if (special and version is None and key in ev.markets
+                    and m.get("status", "open") == "open"):
+                continue                        # no version: it repeats the price held
             if version is not None:
                 if seen is not None and version < seen:
                     continue                    # an older update arriving late
                 ev.versions[key] = version
-            if m.get("status") == "open":
+            if m.get("status") == "open" or (special and "status" not in m):
                 fair = m.get("fair")
                 if fair is not None:            # snapshot parts carry it inline
                     m = {k: v for k, v in m.items() if k != "fair"}
@@ -145,22 +167,30 @@ class Book:
         if rewind:
             # An older picture of the periods: close only markets no newer than it.
             if newest is not None:
-                self._close_periods(ev, rec.get("periods"), up_to=newest)
+                self._close_periods(ev, rec.get("periods"), up_to=newest, special=special)
         else:
-            self._close_periods(ev, rec.get("periods"))
+            self._close_periods(ev, rec.get("periods"), special=special)
 
     @staticmethod
-    def _close_periods(ev: _Event, periods: Any, up_to: Optional[int] = None) -> None:
-        closed = set()
+    def _period_status(periods: Any) -> Dict[str, Any]:
+        """``{"<period>": status}`` from either form of ``periods``."""
+        out: Dict[str, Any] = {}
         if isinstance(periods, dict):           # {"0": {"status": ...}} or {"0": "open"}
             for num, p in periods.items():
-                status = p.get("status") if isinstance(p, dict) else p
-                if status in _CLOSED_PERIOD:
-                    closed.add(str(num))
+                out[str(num)] = p.get("status") if isinstance(p, dict) else p
         elif isinstance(periods, list):
             for p in periods:
-                if isinstance(p, dict) and p.get("status") in _CLOSED_PERIOD:
-                    closed.add(str(p.get("period")))
+                if isinstance(p, dict):
+                    out[str(p.get("period"))] = p.get("status")
+        return out
+
+    @classmethod
+    def _close_periods(cls, ev: _Event, periods: Any, up_to: Optional[int] = None,
+                       special: bool = False) -> None:
+        # A special is only gone when its period is settled: `closed` is a suspension.
+        removing = ("settled",) if special else _CLOSED_PERIOD
+        closed = {num for num, status in cls._period_status(periods).items()
+                  if status in removing}
         if not closed:
             return
         for key in [k for k, m in ev.markets.items() if str(m.get("period")) in closed
@@ -241,6 +271,19 @@ class Book:
     def market(self, event_id: int, key: str) -> Optional[Market]:
         ev = self._events.get(event_id)
         return ev.markets.get(key) if ev is not None else None
+
+    def is_suspended(self, event_id: int, key: str) -> bool:
+        """``True`` if the market is held but its period is ``closed`` right now.
+
+        Only specials stay in the book while suspended (their period turns ``closed`` and
+        back to ``open``); other markets are removed when their period closes.
+        """
+        ev = self._events.get(event_id)
+        m = ev.markets.get(key) if ev is not None else None
+        if m is None:
+            return False
+        status = self._period_status(ev.meta.get("periods")).get(str(m.get("period")))
+        return status == "closed"
 
     def fair(self, event_id: int, key: str) -> Optional[Dict[str, Any]]:
         """``{"version", "margin", "prices"}`` for the market held, or ``None``.

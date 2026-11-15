@@ -98,6 +98,8 @@ class Stream:
     :param fair: also receive the no-vig and fair prices of every market (``fair``
         messages, and inline in snapshots).
     :param closing: receive the closing line of each match you follow when it kicks off.
+    :param specials: also get specials and player props, with their current prices, in
+        snapshots (on the snapshot's channels: add ``pre`` for pre-match props).
     :param snapshot: ask for the current state when first subscribing (default ``True``).
     :param resync: ask for a snapshot by itself after a reconnect, ``missed`` and ``feed``
         ``up`` (default ``True``). Snapshots count against ``snapshots_per_hour``.
@@ -115,8 +117,8 @@ class Stream:
                  events: Optional[Iterable[int]] = None,
                  channels: Optional[Iterable[str]] = None,
                  streams: Optional[Iterable[str]] = None, everything: bool = False,
-                 fair: bool = False, closing: bool = False, snapshot: bool = True,
-                 resync: bool = True, book: bool = True,
+                 fair: bool = False, closing: bool = False, specials: bool = False,
+                 snapshot: bool = True, resync: bool = True, book: bool = True,
                  book_channels: Optional[Iterable[str]] = None, url: str = STREAM_URL,
                  reconnect: bool = True, max_backoff: float = 30.0,
                  resync_jitter: float = 5.0, queue_size: int = 1000,
@@ -129,6 +131,7 @@ class Stream:
         self._filter = _fields(sports, events, channels, streams, everything)
         self._fair = bool(fair)
         self._closing = bool(closing)
+        self._specials = bool(specials)
         self._snapshot = bool(snapshot)
         self.resync = bool(resync)
         if book_channels is None:
@@ -230,12 +233,13 @@ class Stream:
                         channels: Optional[Iterable[str]] = None,
                         streams: Optional[Iterable[str]] = None, everything: bool = False,
                         fair: Optional[bool] = None, closing: Optional[bool] = None,
+                        specials: Optional[bool] = None,
                         snapshot: Optional[bool] = None) -> None:
-        """Add to the filter (subscriptions add up). ``fair=True`` / ``closing=True`` turn
-        those on; use :meth:`unsubscribe` to turn them off.
+        """Add to the filter (subscriptions add up). ``fair=True`` / ``closing=True`` /
+        ``specials=True`` turn those on; use :meth:`unsubscribe` to turn them off.
 
         ``snapshot`` defaults to ``True`` when you add to the filter (the state of what you
-        added) and to ``False`` when you only turn ``fair`` or ``closing`` on.
+        added) and to ``False`` when you only turn ``fair``, ``closing`` or ``specials`` on.
         """
         fields = _fields(sports, events, channels, streams, everything)
         msg: Dict[str, Any] = {"type": "subscribe", **fields}
@@ -243,6 +247,8 @@ class Stream:
             msg["fair"] = True
         if closing:
             msg["closing"] = True
+        if specials:
+            msg["specials"] = True
         if snapshot is None:
             snapshot = bool(fields)
         msg["snapshot"] = bool(snapshot)
@@ -252,14 +258,18 @@ class Stream:
                           events: Optional[Iterable[int]] = None,
                           channels: Optional[Iterable[str]] = None,
                           streams: Optional[Iterable[str]] = None, everything: bool = False,
-                          fair: bool = False, closing: bool = False) -> None:
-        """Remove from the filter; ``fair=True`` / ``closing=True`` turn those off."""
+                          fair: bool = False, closing: bool = False,
+                          specials: bool = False) -> None:
+        """Remove from the filter; ``fair=True`` / ``closing=True`` / ``specials=True`` turn
+        those off."""
         msg: Dict[str, Any] = {"type": "unsubscribe",
                                **_fields(sports, events, channels, streams, everything)}
         if fair:
             msg["fair"] = True
         if closing:
             msg["closing"] = True
+        if specials:
+            msg["specials"] = True
         await self.send(msg)
 
     async def request_snapshot(self, *, sports: Optional[Iterable[int]] = None,
@@ -317,6 +327,12 @@ class Stream:
                          f.get("streams"), bool(f.get("all")))
         return (fields, self.subscription.get("fair") is True,
                 self.subscription.get("closing") is True)
+
+    def _specials_on(self) -> bool:
+        """``specials`` as the server last confirmed it, or the constructor's."""
+        if self.subscription is None:
+            return self._specials
+        return self.subscription.get("specials") is True
 
     def _snapshot_msg(self) -> Dict[str, Any]:
         """A snapshot of everything subscribed, but only on the book's channels: a bare
@@ -438,14 +454,17 @@ class Stream:
         """Subscribe again to the confirmed filter, then send what was not confirmed or
         was asked for while disconnected."""
         fields, fair, closing = self._confirmed()
+        specials = self._specials_on()
         unconfirmed, self._unconfirmed = self._unconfirmed, []
         pending, self._pending = self._pending, []
-        if fields or fair or closing:
+        if fields or fair or closing or specials:
             msg: Dict[str, Any] = {"type": "subscribe", **fields}
             if fair:
                 msg["fair"] = True
             if closing:
                 msg["closing"] = True
+            if specials:
+                msg["specials"] = True
             snap = self._snapshot_msg() if (want_snapshot and fields) else None
             msg["snapshot"] = snap is not None and len(snap) == 1   # bare: let subscribe do it
             await self._send(ws, msg)

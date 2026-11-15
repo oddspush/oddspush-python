@@ -301,3 +301,31 @@ def test_default_book_channels():
     assert Stream("t", channels=["dz"]).book.channels == {"ld", "both"}
     assert Stream("t", book=False).book is None
     assert issubclass(TokenReplaced, OddsPushError)
+
+
+async def test_specials_is_sent_and_restored(fake_server):
+    async def first(c):
+        await c.login()
+        await c.recv()
+        await c.send({"type": "subscription", "filter": {"all": False, "sports": [5],
+                      "events": [], "streams": [], "channels": ["ld", "both", "pre"]},
+                      "fair": False, "closing": False, "specials": True})
+        await c.close(1011, "boom")
+
+    async def second(c):
+        await c.login()
+        await c.recv()
+        await c.hold()
+
+    async with fake_server(first, second) as srv:
+        async with fast(Stream("opk_test", url=srv.url, sports=[5], specials=True,
+                               snapshot=False)) as stream:
+            await take(stream, "disconnected")
+            await take(stream, "welcome")
+            for _ in range(50):
+                if len(srv.conns) == 2 and srv.conns[1].received[1:]:
+                    break
+                await asyncio.sleep(0.02)
+            assert srv.conns[0].received[1] == {"type": "subscribe", "sports": [5],
+                                                "specials": True, "snapshot": False}
+            assert srv.conns[1].received[1]["specials"] is True
