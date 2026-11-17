@@ -1,7 +1,7 @@
 """Closing line value of your bets, against Pinnacle's fair closing price.
 
 bets.csv has one bet per line: event_id,market_key,designation,decimal_odds
-(for example ``1639824805,s;0;m,home,2.10``). Closing lines are kept for 7 days.
+(for example ``1639824805,s;0;m,home,2.10``). Closing lines are kept for 90 days.
 
     ODDSPUSH_KEY=opk_... python clv_report.py bets.csv
 """
@@ -20,7 +20,7 @@ def main(path):
             try:
                 line = api.closing(int(event_id))
             except NotFound:
-                print(f"{event_id}: no closing line (not started yet, or older than 7 days)")
+                print(f"{event_id}: no closing line (not started yet, or older than 90 days)")
                 continue
             market = next((m for m in line["markets"] if m["key"] == key), None)
             leg = next((p for p in (market or {}).get("prices", [])

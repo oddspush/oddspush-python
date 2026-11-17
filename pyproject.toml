@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oddspush"
-version = "0.2.0"
-description = "Python client for the OddsPush API: real-time Pinnacle odds over WebSocket and REST, with no-vig, fair and closing-line (CLV) prices."
+version = "0.3.0"
+description = "Python client for the OddsPush API: real-time Pinnacle odds over WebSocket and REST, with no-vig and fair prices, drop alerts, line history, closing-line (CLV) prices and an MCP server."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,7 +13,8 @@ requires-python = ">=3.10"
 authors = [{ name = "OddsPush", email = "support@oddspush.com" }]
 keywords = [
     "pinnacle", "pinnacle-api", "odds", "odds-api", "sports-betting", "betting",
-    "websocket", "no-vig", "fair-odds", "clv", "closing-line", "polymarket", "kalshi",
+    "websocket", "no-vig", "fair-odds", "clv", "closing-line", "line-history", "dropping-odds",
+    "mcp", "polymarket", "kalshi",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -37,6 +38,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-asyncio>=0.21"]
+mcp = ["mcp>=2.3,<3"]
+
+[project.scripts]
+oddspush-mcp = "oddspush.mcp_server:main"
 
 [project.urls]
 Homepage = "https://oddspush.com"

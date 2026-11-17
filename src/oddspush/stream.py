@@ -16,8 +16,11 @@ What it does for you:
 - never lets a snapshot put ``dz`` (or any channel outside the book) into the book: with such
   a channel in the filter it asks for snapshots of the book's channels only;
 - stops, raising the error, on what retrying cannot fix: an unknown token, an expired plan,
-  a plan without the stream, or the token taken over from another machine (``replaced``:
-  reconnecting would knock that machine off, and it would do the same to you).
+  a plan without the stream, a free token without ``accept_delay=True``, or the token taken
+  over from another machine (``replaced``: reconnecting would knock that machine off, and it
+  would do the same to you);
+- on the free plan (``accept_delay=True``), reconnects at once when the account moves to a
+  trial or a paid plan (``plan_changed``), and the odds then arrive in real time.
 
 Besides the API's own messages, the iterator yields one of its own: ``{"type":
 "disconnected", "reason": ..., "retry_in_s": ...}`` each time the connection drops.
@@ -30,18 +33,20 @@ reconnects.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import random
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import (Any, AsyncIterator, Callable, Dict, FrozenSet, Iterable, List, Optional,
+                    Tuple, Union)
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from ._constants import PRICE_CHANNELS, STREAM_URL
 from .book import Book
-from .errors import (CLOSE_CODES, FatalError, OddsPushError, RateLimited, StreamClosed,
-                     error_for)
+from .errors import (CLOSE_CODES, FatalError, OddsPushError, PlanChanged, RateLimited,
+                     StreamClosed, error_for)
 
 log = logging.getLogger("oddspush")
 
@@ -53,6 +58,41 @@ _RETRY_MARGIN_S = 0.5      # `retry_after_s` is rounded to 0.1 s: ask a little l
 _RETRY_DEFAULT_S = 60.0    # a refusal without `retry_after_s`
 _PENDING_MAX = 100         # messages kept while disconnected
 _FILTER_ERRORS = ("too_many_events", "filter_too_large", "empty_filter")
+_NOT_READY_WAIT_S = 5.0    # free plan: the delayed feed is filling up, ask again later
+
+#: The windows ``drop_alerts`` accepts, in seconds, and the range of ``min_pct``.
+DROP_WINDOWS = (30, 60, 300, 600)
+DROP_MIN_PCT = (1, 50)
+
+DropAlerts = Union[bool, Dict[str, Any]]
+
+
+def _drop_alerts(value: Any) -> Union[bool, Dict[str, Any]]:
+    """``drop_alerts`` as the API takes it: ``True`` (3 % within 60 s), or
+    ``{"min_pct": ..., "window_s": ...}`` (either can be left out). ``False``/``None``: off."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if not isinstance(value, dict):
+        raise ValueError("drop_alerts must be True or a dict with min_pct and window_s")
+    unknown = set(value) - {"min_pct", "window_s"}
+    if unknown:
+        raise ValueError(f"drop_alerts: unknown keys {sorted(unknown)}")
+    out: Dict[str, Any] = {}
+    if "window_s" in value:
+        w = value["window_s"]
+        if isinstance(w, bool) or w not in DROP_WINDOWS:
+            raise ValueError(f"drop_alerts window_s must be one of {DROP_WINDOWS}")
+        out["window_s"] = int(w)
+    if "min_pct" in value:
+        m = value["min_pct"]
+        if (isinstance(m, bool) or not isinstance(m, (int, float))
+                or not DROP_MIN_PCT[0] <= m <= DROP_MIN_PCT[1]):
+            raise ValueError(f"drop_alerts min_pct must be from {DROP_MIN_PCT[0]} to "
+                             f"{DROP_MIN_PCT[1]}")
+        out["min_pct"] = m
+    return out or True
 
 
 def _fields(sports: Optional[Iterable[int]] = None, events: Optional[Iterable[int]] = None,
@@ -100,6 +140,17 @@ class Stream:
     :param closing: receive the closing line of each match you follow when it kicks off.
     :param specials: also get specials and player props, with their current prices, in
         snapshots (on the snapshot's channels: add ``pre`` for pre-match props).
+    :param drop_alerts: receive a ``drop`` message when a price shortens: ``True`` (3 % or
+        more within 60 seconds) or ``{"min_pct": 5, "window_s": 30}`` (``window_s`` one of
+        30, 60, 300 or 600; ``min_pct`` from 1 to 50). Measured on the fair price, so a change
+        of margin alone never alerts. Trials and paid plans.
+    :param on_drop: called with the ``data`` of every ``drop`` message, in the read loop
+        (keep it fast; a coroutine function is run as a task). The messages are also
+        yielded by the iterator, and :meth:`drops` yields only them.
+    :param accept_delay: accept the free plan's delay. A free token only logs in with it
+        (without it the stream raises :class:`~oddspush.errors.DelayedPlan`); its odds come
+        ``delay_s`` (30) seconds late. Harmless on a trial or paid plan, and with it an
+        expired token keeps receiving odds on the free plan instead of stopping.
     :param snapshot: ask for the current state when first subscribing (default ``True``).
     :param resync: ask for a snapshot by itself after a reconnect, ``missed`` and ``feed``
         ``up`` (default ``True``). Snapshots count against ``snapshots_per_hour``.
@@ -118,6 +169,9 @@ class Stream:
                  channels: Optional[Iterable[str]] = None,
                  streams: Optional[Iterable[str]] = None, everything: bool = False,
                  fair: bool = False, closing: bool = False, specials: bool = False,
+                 drop_alerts: DropAlerts = False,
+                 on_drop: Optional[Callable[[Dict[str, Any]], Any]] = None,
+                 accept_delay: bool = False,
                  snapshot: bool = True, resync: bool = True, book: bool = True,
                  book_channels: Optional[Iterable[str]] = None, url: str = STREAM_URL,
                  reconnect: bool = True, max_backoff: float = 30.0,
@@ -132,6 +186,9 @@ class Stream:
         self._fair = bool(fair)
         self._closing = bool(closing)
         self._specials = bool(specials)
+        self._drop_alerts = _drop_alerts(drop_alerts)
+        self.on_drop = on_drop
+        self.accept_delay = bool(accept_delay)
         self._snapshot = bool(snapshot)
         self.resync = bool(resync)
         if book_channels is None:
@@ -162,12 +219,23 @@ class Stream:
         self._owed = 0            # snapshots asked for and neither served nor refused
         self._last_error: Optional[Dict[str, Any]] = None
         self._snapshot_task: Optional[asyncio.Task] = None
+        self._callbacks: set = set()     # on_drop coroutines still running
 
     # ------------------------------------------------------------------ lifecycle
     @property
     def account(self) -> Optional[Dict[str, Any]]:
         """``welcome["account"]``: ``id``, ``plan``, ``expires_at`` and ``limits``."""
         return (self.welcome or {}).get("account")
+
+    @property
+    def delay_s(self) -> float:
+        """How late this connection's odds are, in seconds: ``account.limits.delay_s`` (30 on
+        the free plan), or ``0`` in real time and before the first login."""
+        limits = (self.account or {}).get("limits") or {}
+        value = limits.get("delay_s")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            return 0.0
+        return float(value)
 
     @property
     def connected(self) -> bool:
@@ -187,6 +255,8 @@ class Stream:
         self._closed = True
         if self._snapshot_task is not None:
             self._snapshot_task.cancel()
+        for task in list(self._callbacks):      # on_drop coroutines still running
+            task.cancel()
         if self._task is not None and not self._task.done():
             self._task.cancel()
             try:
@@ -234,14 +304,19 @@ class Stream:
                         streams: Optional[Iterable[str]] = None, everything: bool = False,
                         fair: Optional[bool] = None, closing: Optional[bool] = None,
                         specials: Optional[bool] = None,
+                        drop_alerts: Optional[DropAlerts] = None,
                         snapshot: Optional[bool] = None) -> None:
         """Add to the filter (subscriptions add up). ``fair=True`` / ``closing=True`` /
-        ``specials=True`` turn those on; use :meth:`unsubscribe` to turn them off.
+        ``specials=True`` / ``drop_alerts=True`` turn those on (``drop_alerts`` also takes
+        ``{"min_pct": ..., "window_s": ...}``, which replaces the settings you had); use
+        :meth:`unsubscribe` to turn them off.
 
         ``snapshot`` defaults to ``True`` when you add to the filter (the state of what you
-        added) and to ``False`` when you only turn ``fair``, ``closing`` or ``specials`` on.
+        added) and to ``False`` when you only turn ``fair``, ``closing``, ``specials`` or
+        ``drop_alerts`` on.
         """
         fields = _fields(sports, events, channels, streams, everything)
+        drops = _drop_alerts(drop_alerts)
         msg: Dict[str, Any] = {"type": "subscribe", **fields}
         if fair:
             msg["fair"] = True
@@ -249,6 +324,8 @@ class Stream:
             msg["closing"] = True
         if specials:
             msg["specials"] = True
+        if drops:
+            msg["drop_alerts"] = drops
         if snapshot is None:
             snapshot = bool(fields)
         msg["snapshot"] = bool(snapshot)
@@ -259,9 +336,9 @@ class Stream:
                           channels: Optional[Iterable[str]] = None,
                           streams: Optional[Iterable[str]] = None, everything: bool = False,
                           fair: bool = False, closing: bool = False,
-                          specials: bool = False) -> None:
-        """Remove from the filter; ``fair=True`` / ``closing=True`` / ``specials=True`` turn
-        those off."""
+                          specials: bool = False, drop_alerts: bool = False) -> None:
+        """Remove from the filter; ``fair=True`` / ``closing=True`` / ``specials=True`` /
+        ``drop_alerts=True`` turn those off."""
         msg: Dict[str, Any] = {"type": "unsubscribe",
                                **_fields(sports, events, channels, streams, everything)}
         if fair:
@@ -270,6 +347,8 @@ class Stream:
             msg["closing"] = True
         if specials:
             msg["specials"] = True
+        if drop_alerts:
+            msg["drop_alerts"] = True
         await self.send(msg)
 
     async def request_snapshot(self, *, sports: Optional[Iterable[int]] = None,
@@ -281,6 +360,16 @@ class Stream:
         arguments it covers everything you subscribed to, on the book's channels."""
         fields = _fields(sports, events, channels, streams, everything)
         await self.send({"type": "snapshot", **fields} if fields else self._snapshot_msg())
+
+    async def drops(self) -> AsyncIterator[Dict[str, Any]]:
+        """Iterate over the ``data`` of the ``drop`` messages only (``drop_alerts`` on).
+
+        It reads the same stream as ``async for msg in stream``: use one or the other. The
+        book keeps up to date either way.
+        """
+        async for msg in self:
+            if msg.get("type") == "drop" and isinstance(msg.get("data"), dict):
+                yield msg["data"]
 
     async def ping(self, id: int = 0) -> None:
         await self.send({"type": "ping", "id": int(id)})
@@ -317,27 +406,35 @@ class Stream:
             self._owed += 1
 
     # ------------------------------------------------------------------ filter state
-    def _confirmed(self) -> Tuple[Dict[str, Any], bool, bool]:
-        """The filter, ``fair`` and ``closing`` the server last confirmed, or the
-        constructor's before any confirmation."""
+    def _confirmed(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """The filter and the extras on (``fair``, ``closing``, ``specials``,
+        ``drop_alerts``, as a ``subscribe`` takes them) that the server last confirmed, or
+        the constructor's before any confirmation."""
         if self.subscription is None:
-            return dict(self._filter), self._fair, self._closing
-        f = self.subscription.get("filter") or {}
+            extras: Dict[str, Any] = {"fair": self._fair, "closing": self._closing,
+                                      "specials": self._specials,
+                                      "drop_alerts": self._drop_alerts}
+            return dict(self._filter), {k: v for k, v in extras.items() if v}
+        sub = self.subscription
+        f = sub.get("filter") or {}
         fields = _fields(f.get("sports"), f.get("events"), f.get("channels"),
                          f.get("streams"), bool(f.get("all")))
-        return (fields, self.subscription.get("fair") is True,
-                self.subscription.get("closing") is True)
-
-    def _specials_on(self) -> bool:
-        """``specials`` as the server last confirmed it, or the constructor's."""
-        if self.subscription is None:
-            return self._specials
-        return self.subscription.get("specials") is True
+        extras = {k: True for k in ("fair", "closing", "specials") if sub.get(k) is True}
+        drops = sub.get("drop_alerts")
+        if isinstance(drops, dict):
+            try:
+                extras["drop_alerts"] = _drop_alerts(
+                    {k: drops[k] for k in ("min_pct", "window_s") if k in drops})
+            except ValueError:
+                extras["drop_alerts"] = True
+        elif drops is True:
+            extras["drop_alerts"] = True
+        return fields, extras
 
     def _snapshot_msg(self) -> Dict[str, Any]:
         """A snapshot of everything subscribed, but only on the book's channels: a bare
         snapshot would merge every subscribed channel (``dz`` included) into the book."""
-        fields, _, _ = self._confirmed()
+        fields, _ = self._confirmed()
         chans = fields.get("channels")
         if not chans or set(chans) <= self._price_channels:
             return {"type": "snapshot"}
@@ -367,6 +464,8 @@ class Stream:
                     return
                 except RateLimited as e:
                     wait, reason = e.retry_after, e.code
+                except PlanChanged as e:
+                    wait, reason, backoff = 0.0, e.code, 1.0
                 except OddsPushError as e:
                     reason = e.code
                 except ConnectionClosed as e:
@@ -374,14 +473,19 @@ class Stream:
                     name = CLOSE_CODES.get(code or 0)
                     if name is None and self._last_error is not None:
                         name = self._last_error.get("code")
+                    last = self._last_error or {}
                     err = error_for(name, f"stream closed: {name} ({code})", close_code=code,
-                                    retry_after=(self._last_error or {}).get("retry_after_s")) \
+                                    retry_after=last.get("retry_after_s"),
+                                    details={k: v for k, v in last.items()
+                                             if k not in ("type", "code")}) \
                         if name else None
                     if isinstance(err, FatalError):
                         self._exc = err
                         return
                     if isinstance(err, RateLimited):
                         wait = err.retry_after or self.max_backoff
+                    elif isinstance(err, PlanChanged):
+                        wait, backoff = 0.0, 1.0      # real time now: come back at once
                     reason = name or f"closed ({code} {text})".strip()
                 except _Maintenance:
                     wait, reason = _MAINTENANCE_WAIT_S, "maintenance"
@@ -422,7 +526,10 @@ class Stream:
         async with websockets.connect(self.url, compression=None, max_size=_MAX_MESSAGE,
                                       open_timeout=self.login_timeout, close_timeout=5,
                                       ping_interval=20, ping_timeout=20) as ws:
-            await ws.send(json.dumps({"type": "login", "token": self._token}))
+            login: Dict[str, Any] = {"type": "login", "token": self._token}
+            if self.accept_delay:
+                login["accept_delay"] = True
+            await ws.send(json.dumps(login))
             raw = await asyncio.wait_for(ws.recv(), self.login_timeout)
             try:
                 reply = json.loads(raw)
@@ -431,7 +538,9 @@ class Stream:
             if not isinstance(reply, dict):
                 raise OddsPushError("unexpected", "the login was not answered with JSON")
             if reply.get("type") == "error":
-                raise error_for(str(reply.get("code")), retry_after=reply.get("retry_after_s"))
+                details = {k: v for k, v in reply.items() if k not in ("type", "code")}
+                raise error_for(str(reply.get("code")), retry_after=reply.get("retry_after_s"),
+                                details=details)
             if reply.get("type") != "welcome":
                 raise OddsPushError("unexpected", f"expected welcome, got {reply.get('type')!r}")
             self.welcome = reply
@@ -453,18 +562,11 @@ class Stream:
     async def _restore(self, ws: Any, want_snapshot: bool) -> None:
         """Subscribe again to the confirmed filter, then send what was not confirmed or
         was asked for while disconnected."""
-        fields, fair, closing = self._confirmed()
-        specials = self._specials_on()
+        fields, extras = self._confirmed()
         unconfirmed, self._unconfirmed = self._unconfirmed, []
         pending, self._pending = self._pending, []
-        if fields or fair or closing or specials:
-            msg: Dict[str, Any] = {"type": "subscribe", **fields}
-            if fair:
-                msg["fair"] = True
-            if closing:
-                msg["closing"] = True
-            if specials:
-                msg["specials"] = True
+        if fields or extras:
+            msg: Dict[str, Any] = {"type": "subscribe", **fields, **extras}
             snap = self._snapshot_msg() if (want_snapshot and fields) else None
             msg["snapshot"] = snap is not None and len(snap) == 1   # bare: let subscribe do it
             await self._send(ws, msg)
@@ -477,7 +579,10 @@ class Stream:
         kind = msg.get("type")
         if self.book is not None and kind in ("odds", "snapshot", "fair"):
             self.book.apply_message(msg)
-        if kind == "snapshot":
+        if kind == "drop":
+            if self.on_drop is not None and isinstance(msg.get("data"), dict):
+                self._call_on_drop(msg["data"])
+        elif kind == "snapshot":
             if msg.get("final") and self._owed:
                 self._owed -= 1
         elif kind == "subscription":
@@ -498,11 +603,42 @@ class Stream:
                     retry = msg.get("retry_after_s")
                     wait = _RETRY_DEFAULT_S if retry is None else max(float(retry), 0.0)
                     self._schedule_snapshot(wait + _RETRY_MARGIN_S, force=True)
+            elif code == "not_ready":
+                # Free plan, right after a restart of the service: the snapshot was refused.
+                if self._owed:
+                    self._owed -= 1
+                    retry = msg.get("retry_after_s")
+                    wait = _NOT_READY_WAIT_S if retry is None else max(float(retry), 0.0)
+                    self._schedule_snapshot(wait + _RETRY_MARGIN_S, force=True)
+            elif code == "not_in_plan":
+                log.warning("oddspush: not in your plan, ignored: %s (the free plan has odds "
+                            "only; the 7-day trial and the paid plans have them)",
+                            ", ".join(str(f) for f in msg.get("features") or []) or "?")
+            elif code == "invalid_drop_alerts":
+                log.warning("oddspush: drop_alerts rejected (window_s one of %s, min_pct %s); "
+                            "they stay as they were", msg.get("windows"), msg.get("min_pct"))
             elif code in _FILTER_ERRORS:
                 if self._unconfirmed:
                     self._unconfirmed.pop(0)
             elif code in CLOSE_CODES.values():
                 self._last_error = msg
+
+    def _call_on_drop(self, data: Dict[str, Any]) -> None:
+        """Run ``on_drop`` without letting it break the stream."""
+        assert self.on_drop is not None
+        try:
+            result = self.on_drop(data)
+            if inspect.isawaitable(result):
+                task = asyncio.ensure_future(result)
+                self._callbacks.add(task)
+                task.add_done_callback(self._callback_done)
+        except Exception:
+            log.exception("oddspush: on_drop raised")
+
+    def _callback_done(self, task: "asyncio.Future") -> None:
+        self._callbacks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error("oddspush: on_drop raised", exc_info=task.exception())
 
     def _schedule_snapshot(self, delay: float, force: bool = False) -> None:
         """Ask for a snapshot after ``delay`` seconds. A request still waiting to go out

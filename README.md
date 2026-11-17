@@ -1,8 +1,8 @@
 # oddspush
 
 Python client for the [OddsPush](https://oddspush.com) API: **real-time Pinnacle odds** over
-one WebSocket, plus a REST API, with **no-vig and fair prices** and the **closing line** for
-your CLV.
+one WebSocket, plus a REST API, with **no-vig and fair prices**, **drop alerts**, **line
+history** and the **closing line** for your CLV. Includes an **MCP server** for AI agents.
 
 - All 13 sports, live and pre-match.
 - A local price book, kept up to date for you: merged by version, closed markets and
@@ -11,11 +11,14 @@ your CLV.
 - Sync and asyncio REST clients.
 - Pure Python, two dependencies (`websockets`, `httpx`), Python 3.10+.
 
-You need an API key (`opk_...`). [Start a free 7-day trial](https://oddspush.com) to get
-one. Full API reference: [oddspush.com/docs](https://oddspush.com/docs).
+You need an API key (`opk_...`). [Sign up at oddspush.com](https://oddspush.com) and you get a
+free key at once (odds 30 seconds late, see [Free plan](#free-plan)); the 7-day real-time
+trial and the paid plans have everything. Full API reference:
+[oddspush.com/docs](https://oddspush.com/docs).
 
 ```bash
 pip install oddspush
+pip install "oddspush[mcp]"     # with the MCP server, oddspush-mcp
 ```
 
 ## Stream live odds
@@ -78,16 +81,60 @@ It only returns the fair price of the very market version the book holds.
 ## Closing line and CLV
 
 ```python
-from oddspush import Client, clv
+from oddspush import Client
 
 with Client("opk_...") as api:
-    line = api.closing(1639824805)          # pre-match or live event id
-    ml = next(m for m in line["markets"] if m["key"] == "s;0;m")
-    home = next(p for p in ml["prices"] if p["designation"] == "home")
-    print(clv(2.10, home["fair_decimal"]))  # your price vs the fair closing price
+    bet = api.clv(1639824805, "s;0;m", "home", 2.10)   # decimal, or American: -110, 150
+    print(bet["clv_pct"], bet["beat_close"])           # vs the fair closing price, in %
+
+    line = api.closing(1639824805)          # the whole closing line (pre-match or live id)
+    for row in api.iter_closings(sport_id=1, since=1793900000000):   # up to 90 days back
+        print(row["event_id"], row["start_ms"])
 ```
 
-Or get them as they happen with `Stream(..., closing=True)` (`closing` messages).
+Closing lines are kept for 90 days after the start. Get them as they happen with
+`Stream(..., closing=True)` (`closing` messages), and work out the CLV of your own prices
+with `oddspush.clv(your_decimal, fair_decimal)`.
+
+## Line history
+
+Every change of price, line or status of an event's markets over the last 14 days, oldest
+first:
+
+```python
+with Client("opk_...") as api:
+    for row in api.iter_history(1639824805, key="s;0;m", fair=True):
+        print(row["time"], row["channel"], row["status"],
+              [(p["designation"], p["price"]) for p in row["prices"]])
+```
+
+`history()` returns one page (`more`, `next_since`); `iter_history()` follows the pages. The
+pre-match and the live version of a match are different events: ask for each.
+
+## Drop alerts
+
+A `drop` message when a price shortens by at least `min_pct` % within `window_s` seconds,
+measured on the fair price, so a change of margin alone never alerts. Each alert has the
+match (league, teams, live score and minute), the market, the leg and the price before and
+after:
+
+```python
+async with Stream("opk_...", sports=[1], drop_alerts={"min_pct": 5, "window_s": 60}) as stream:
+    async for drop in stream.drops():
+        print(drop["home"], drop["away"], drop["market"]["key"], drop["designation"],
+              drop["from"]["decimal"], "->", drop["to"]["decimal"], drop["change_pct"])
+```
+
+`drop_alerts=True` means 3 % within 60 seconds; `window_s` is one of 30, 60, 300 or 600 and
+`min_pct` from 1 to 50. You can also pass `on_drop=callback`, or read `drop` messages from
+the main iterator. The setting is restored on reconnect like the rest of your filter. The
+drops of the last hour are on REST too:
+
+```python
+with Client("opk_...") as api:
+    page = api.drops(sport_id=1, min_pct=5, window_s=60)      # oldest first, with a cursor
+    new = api.drops(sport_id=1, min_pct=5, window_s=60, after=page["cursor"])  # only new ones
+```
 
 ## Player props and specials
 
@@ -129,7 +176,62 @@ with Client("opk_...") as api:
 
 `AsyncClient` has the same methods, awaitable. A `429` is retried after `retry-after`
 (`max_retries=2`), then raised as `RateLimited`. Limits: 120 requests at once, then 300 a
-minute per account.
+minute per account (20 and 60 on the free plan).
+
+`Client(...).status()` (or `oddspush.get_status()`, without a key) gives the public status:
+whether the feed is flowing and the latency measured every 5 minutes by a client connected
+like you.
+
+## Free plan
+
+A free key gets the same odds, live and pre-match, all 13 sports, over the stream and REST,
+**30 seconds late**: enough to explore and to build and test a bot, not to trade live odds.
+No fair prices, closing lines, CLV, line history, drop alerts or specials: those come with
+the 7-day trial and the paid plans.
+
+You have to accept the delay, so that a bot never trades on late prices without knowing:
+
+```python
+async with Stream("opk_...", sports=[1], accept_delay=True) as stream:
+    async for msg in stream:
+        if msg["type"] == "welcome":
+            print("odds are", stream.delay_s, "seconds late")   # 30 free, 0 in real time
+
+with Client("opk_...", accept_delay=True) as api:
+    api.events(sport_id=1)
+```
+
+- Without `accept_delay=True` a free key raises `DelayedPlan` (the stream stops, close 4110).
+- `accept_delay=True` is harmless on a paid key, and with it an expired key keeps receiving
+  odds on the free plan instead of stopping with `SubscriptionExpired`.
+- If you upgrade while connected, the stream reconnects at once (`plan_changed`) and the odds
+  arrive in real time.
+- A `try_again` (we could not check the key right now) is retried after `retry_after_s`.
+- Asking a free key for `fair`, `closing`, `specials` or `drop_alerts` logs a warning and
+  they stay off (`not_in_plan`); on REST it raises `NotInPlan`.
+
+## MCP server for AI agents
+
+`pip install "oddspush[mcp]"` adds `oddspush-mcp`, an MCP server (stdio) for Claude, Cursor
+and any MCP client that runs local servers. Its tools: `list_sports`, `list_events`,
+`get_event`, `get_line_history`, `get_closing`, `list_closings`, `get_clv` and
+`recent_drops`. Each tool calls the REST API from your machine with the key in
+`ODDSPUSH_API_KEY`.
+
+```bash
+claude mcp add oddspush --env ODDSPUSH_API_KEY=opk_... -- oddspush-mcp
+```
+
+Or, in a client's JSON config (Claude Desktop, Cursor...):
+
+```json
+{"mcpServers": {"oddspush": {"command": "oddspush-mcp",
+                             "env": {"ODDSPUSH_API_KEY": "opk_..."}}}}
+```
+
+With a free key, `list_sports`, `list_events` and `get_event` work, 30 seconds late; the other
+tools say which plans have them. Like any REST request, a call from a new IP beyond your
+connections takes the key over from the oldest IP: run it on the machine your bot runs on.
 
 ## What the stream does for you
 
@@ -142,7 +244,8 @@ minute per account.
 - Snapshots count against your plan's `snapshots_per_hour`. Pass `resync=False` to stop
   the automatic ones.
 - Stops and raises on what retrying cannot fix: `Unauthorized`, `SubscriptionExpired`,
-  `NotInPlan` (a REST-only plan) and `TokenReplaced`.
+  `NotInPlan` (a REST-only plan), `DelayedPlan` (a free key without `accept_delay=True`) and
+  `TokenReplaced`.
 
 Change the subscription at any time:
 
@@ -150,6 +253,8 @@ Change the subscription at any time:
 await stream.subscribe(sports=[2, 3])
 await stream.unsubscribe(sports=[3])
 await stream.subscribe(fair=True)     # turn fair prices on, filter unchanged, no snapshot
+await stream.subscribe(drop_alerts={"min_pct": 4})
+await stream.unsubscribe(drop_alerts=True)
 await stream.request_snapshot()
 ```
 
@@ -159,7 +264,8 @@ for an hour and have no open market left.
 ### One machine per connection
 
 A token works from as many IPs at a time as the connections in your plan: one included,
-plus any extra connections you add (90 USD each for 30 days, from your account page). Using it from
+plus any extra connections you add from your account page (with your plan in one payment,
+ending with it, or on their own for 30 days; 90 USD a month each). Using it from
 a new IP beyond that (a stream login or a REST request) takes over from the oldest IP and
 closes the stream there (`TokenReplaced`). With one connection, run your stream and your
 REST calls from the same machine.
@@ -173,7 +279,8 @@ server closes the connection and the stream reconnects. Host your bot close to I
 ## Examples
 
 See [`examples/`](https://github.com/oddspush/oddspush-python/tree/main/examples): a live
-printer, a fair-price watcher, a pre-match tracker and a CLV report.
+printer, a fair-price watcher, a pre-match tracker, drop alerts, a CLV report and a CLV report
+with the line history of each bet.
 
 ## Links
 
