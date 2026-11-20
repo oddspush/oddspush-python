@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "oddspush"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python client for the OddsPush API: real-time Pinnacle odds over WebSocket and REST, with no-vig and fair prices, drop alerts, line history, closing-line (CLV) prices and an MCP server."
 readme = "README.md"
 license = "MIT"

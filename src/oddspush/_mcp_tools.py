@@ -284,14 +284,20 @@ TOOLS: List[Dict[str, Any]] = [
         "name": "list_closings",
         "title": "List closing lines",
         "description": "List the matches that have a closing line, by start time (event_id, "
-                       "sport_id, start_ms), oldest first. Default: the last 24 hours. Then call "
-                       "get_closing or get_clv. Trial and paid plans.",
+                       "sport_id, start_ms), oldest first. Default: the last 24 hours. With "
+                       "more: true, the result has next_since and next_after: pass them as since "
+                       "and after for the next page. Then call get_closing or get_clv. Trial and "
+                       "paid plans.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "sport_id": _SPORT_ID,
                 "since": {**_SINCE, "description": "Only matches that started at or after this "
                                                    "time. " + _SINCE["description"]},
+                "after": {"type": "integer", "minimum": 0,
+                          "description": "Only with since: the next_after of the previous page "
+                                         "(skips the matches of that start time up to this "
+                                         "event_id)."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200,
                           "description": "Maximum matches to return."},
             },
@@ -1082,15 +1088,24 @@ async def _get_closing(f: _Feed, a: Args) -> Result:
 async def _list_closings(f: _Feed, a: Args) -> Result:
     sport = _integer(a, "sport_id", 1, 13)
     since = _time(a, "since")
+    after = _integer(a, "after", 0, _MAX_SAFE)
+    if after is not None and since is None:
+        raise ArgumentError("after needs since (the next_since of the previous page)")
     limit = _integer(a, "limit", 1, 1000) or 200
-    r = await f.get("/closing", {"sport_id": sport, "since": since})
+    r = await f.get("/closing", {"sport_id": sport, "since": since, "after": after})
     if not r.ok:
         return from_error(r, "No closing lines in that period.")
     d = _obj(r.data)
     rows = d.get("events") if isinstance(d.get("events"), list) else []
-    return _json({"returned": min(limit, len(rows)),
-                  "more": bool(d.get("more")) or len(rows) > limit,
-                  "events": rows[:limit]}, r.delayed, _CUT_CLOSINGS)
+    rows = rows[:limit] if len(rows) > limit else rows
+    more = bool(d.get("more")) or len(rows) < len(d.get("events") or [])
+    out: Dict[str, Any] = {"returned": len(rows), "more": more, "events": rows}
+    last = rows[-1] if rows and isinstance(rows[-1], dict) else None
+    if more and last is not None:
+        # The cursor of the last row returned (here, not the API's, when cut by `limit`).
+        out["next_since"] = last.get("start_ms")
+        out["next_after"] = last.get("event_id")
+    return _json(out, r.delayed, _CUT_CLOSINGS)
 
 
 def american(decimal: float) -> float:

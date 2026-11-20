@@ -176,7 +176,8 @@ with Client("opk_...") as api:
 
 `AsyncClient` has the same methods, awaitable. A `429` is retried after `retry-after`
 (`max_retries=2`), then raised as `RateLimited`. Limits: 120 requests at once, then 300 a
-minute per account (20 and 60 on the free plan).
+minute per account, times its connections with extras (20 and 60 on the free plan, per
+account and per IP).
 
 `Client(...).status()` (or `oddspush.get_status()`, without a key) gives the public status:
 whether the feed is flowing and the latency measured every 5 minutes by a client connected

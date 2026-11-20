@@ -159,3 +159,28 @@ def test_iter_closings_moves_past_a_page_of_one_instant():
     with make(handler) as api:
         assert [r["event_id"] for r in api.iter_closings(since=50)] == [1, 2, 3]
     assert asked == ["50", "51"]
+
+
+def test_iter_closings_follows_the_cursor():
+    """With ``next_since`` and ``next_after``, the next page skips nothing that shares the
+    last start time, and nothing comes twice."""
+    pages = {
+        (None, None): {"n": 2, "more": True, "next_since": 20, "next_after": 2, "events": [
+            {"event_id": 1, "sport_id": 1, "start_ms": 10},
+            {"event_id": 2, "sport_id": 1, "start_ms": 20}]},
+        ("20", "2"): {"n": 2, "more": True, "next_since": 20, "next_after": 7, "events": [
+            {"event_id": 5, "sport_id": 1, "start_ms": 20},
+            {"event_id": 7, "sport_id": 1, "start_ms": 20}]},
+        ("20", "7"): {"n": 1, "more": False, "events": [
+            {"event_id": 3, "sport_id": 1, "start_ms": 30}]},
+    }
+    asked = []
+
+    def handler(req):
+        key = (req.url.params.get("since"), req.url.params.get("after"))
+        asked.append(key)
+        return httpx.Response(200, json=pages[key])
+
+    with make(handler) as api:
+        assert [r["event_id"] for r in api.iter_closings()] == [1, 2, 5, 7, 3]
+    assert asked == [(None, None), ("20", "2"), ("20", "7")]

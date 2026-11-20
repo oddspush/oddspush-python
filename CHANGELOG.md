@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- `closings(..., after=)`, and `iter_closings()` pages with the `next_since` / `next_after`
+  cursor of `/v1/closing`: no match is skipped when many share one start time (before, a
+  page cut inside one start time could skip some). Falls back to the old paging without it.
+
 ## 0.3.0
 
 - Free plan: `Stream(accept_delay=True)` logs in with `accept_delay`, and

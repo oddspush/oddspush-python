@@ -80,6 +80,18 @@ def _next_since(rows: Any, since: Optional[int]) -> int:
     return last
 
 
+def _next_closing(page: Dict[str, Any], rows: Any,
+                  since: Optional[int]) -> "tuple[int, Optional[int]]":
+    """``(since, after)`` for the next page of ``/v1/closing``: the ``next_since`` and
+    ``next_after`` cursor of the page, which skips nothing; from a service without it, the
+    last ``start_ms`` (:func:`_next_since`)."""
+    nxt, aft = page.get("next_since"), page.get("next_after")
+    if (isinstance(nxt, int) and not isinstance(nxt, bool)
+            and isinstance(aft, int) and not isinstance(aft, bool)):
+        return nxt, aft
+    return _next_since(rows, since), None
+
+
 def _next_history(page: Dict[str, Any], since: Optional[int]) -> Optional[int]:
     """``since`` for the next page of the line history, or ``None`` when it is the last."""
     rows = page.get("history") or []
@@ -220,19 +232,22 @@ class Client(_Base):
         """
         return self._get(f"/v1/closing/{_event_id(event_id)}")
 
-    def closings(self, sport_id: Optional[int] = None, since: Optional[int] = None) -> Dict[str, Any]:
-        """One page of matches with a closing line: ``{"n", "more", "events": [{"event_id",
-        "sport_id", "start_ms"}]}``. ``since`` in ms, default the last 24 hours, at most 90
-        days back."""
-        return self._get("/v1/closing", sport_id=sport_id, since=since)
+    def closings(self, sport_id: Optional[int] = None, since: Optional[int] = None,
+                 after: Optional[int] = None) -> Dict[str, Any]:
+        """One page of matches with a closing line, oldest first: ``{"n", "more", "events":
+        [{"event_id", "sport_id", "start_ms"}]}``, and with ``more``, ``next_since`` and
+        ``next_after`` for the next page (pass them as ``since`` and ``after``). ``since`` in
+        ms, default the last 24 hours, at most 90 days back."""
+        return self._get("/v1/closing", sport_id=sport_id, since=since, after=after)
 
     def iter_closings(self, sport_id: Optional[int] = None,
                       since: Optional[int] = None) -> Iterator[Dict[str, Any]]:
         """Every match with a closing line since ``since``, across pages."""
         seen: set = set()
         stale = 0
+        after: Optional[int] = None
         while True:
-            page = self.closings(sport_id=sport_id, since=since)
+            page = self.closings(sport_id=sport_id, since=since, after=after)
             rows = page.get("events") or []
             fresh = 0
             for r in rows:
@@ -246,7 +261,7 @@ class Client(_Base):
             if stale >= 2:              # the pages stopped moving: never loop forever
                 log.warning("oddspush: closing-line pages stopped advancing at %s", since)
                 return
-            since = _next_since(rows, since)
+            since, after = _next_closing(page, rows, since)
 
     def clv(self, event_id: int, key: str, designation: str, price: Price) -> Dict[str, Any]:
         """The closing line value of a bet, against the closing line of that market and leg.
@@ -388,16 +403,18 @@ class AsyncClient(_Base):
         """See :meth:`Client.closing`."""
         return await self._get(f"/v1/closing/{_event_id(event_id)}")
 
-    async def closings(self, sport_id: Optional[int] = None,
-                       since: Optional[int] = None) -> Dict[str, Any]:
-        return await self._get("/v1/closing", sport_id=sport_id, since=since)
+    async def closings(self, sport_id: Optional[int] = None, since: Optional[int] = None,
+                       after: Optional[int] = None) -> Dict[str, Any]:
+        """See :meth:`Client.closings`."""
+        return await self._get("/v1/closing", sport_id=sport_id, since=since, after=after)
 
     async def iter_closings(self, sport_id: Optional[int] = None,
                             since: Optional[int] = None) -> AsyncIterator[Dict[str, Any]]:
         seen: set = set()
         stale = 0
+        after: Optional[int] = None
         while True:
-            page = await self.closings(sport_id=sport_id, since=since)
+            page = await self.closings(sport_id=sport_id, since=since, after=after)
             rows = page.get("events") or []
             fresh = 0
             for r in rows:
@@ -411,7 +428,7 @@ class AsyncClient(_Base):
             if stale >= 2:              # the pages stopped moving: never loop forever
                 log.warning("oddspush: closing-line pages stopped advancing at %s", since)
                 return
-            since = _next_since(rows, since)
+            since, after = _next_closing(page, rows, since)
 
     async def clv(self, event_id: int, key: str, designation: str,
                   price: Price) -> Dict[str, Any]:

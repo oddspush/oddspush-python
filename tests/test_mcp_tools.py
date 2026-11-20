@@ -347,7 +347,8 @@ async def test_list_closings_and_clv():
     tl = tools(api)
     out = body(await tl.call("list_closings", {"sport_id": 1, "limit": 2,
                                                "since": "2026-11-01T00:00:00Z"}))
-    assert out == {"returned": 2, "more": True, "events": rows[:2]}
+    assert out == {"returned": 2, "more": True, "events": rows[:2],
+                   "next_since": 1, "next_after": 1}
     first = int(datetime(2026, 11, 1, tzinfo=timezone.utc).timestamp() * 1000)
     assert api.seen[0].url.params["since"] == str(first)
     assert body(await tl.call("get_clv", {"event_id": 1, "key": "s;0;m", "designation": "home",
@@ -357,6 +358,17 @@ async def test_list_closings_and_clv():
     await tl.call("get_clv", {"event_id": 1, "key": "s;0;m", "designation": "home",
                               "decimal_odds": 2.5})
     assert api.seen[2].url.params["price"] == "150"
+
+
+async def test_list_closings_follows_the_cursor():
+    rows = [{"event_id": i, "sport_id": 1, "start_ms": 1793458800000} for i in (3, 9)]
+    api = Api(**{"/v1/closing": ok({"n": 2, "more": False, "events": rows})})
+    tl = tools(api)
+    out = body(await tl.call("list_closings", {"since": 1793458800000, "after": 2}))
+    assert out == {"returned": 2, "more": False, "events": rows}
+    assert dict(api.seen[0].url.params) == {"since": "1793458800000", "after": "2"}
+    err = await tl.call("list_closings", {"after": 2})
+    assert "after needs since" in str(err)
 
 
 async def test_recent_drops_keeps_the_newest_first():
